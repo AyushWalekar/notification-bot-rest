@@ -1,6 +1,7 @@
 import { BotBuilderCloudAdapter } from "@microsoft/teamsfx";
 import ConversationBot = BotBuilderCloudAdapter.ConversationBot;
 import config from "./config";
+import { SlackAdapter } from "botbuilder-adapter-slack";
 
 // Create bot.
 export const notificationApp = new ConversationBot({
@@ -15,4 +16,13 @@ export const notificationApp = new ConversationBot({
   notification: {
     enabled: true,
   },
+});
+
+export const slackAdapter = new SlackAdapter({
+  clientId: config.slackClientId,
+  clientSecret: config.slackClientSecret,
+  clientSigningSecret: config.slackSigningSecret,
+  botToken: config.slackBotUserToken,
+  oauthVersion: "v2",
+  enable_incomplete: true,
 });
