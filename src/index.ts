@@ -1,13 +1,16 @@
 import { AdaptiveCards } from "@microsoft/adaptivecards-tools";
-import { TeamsInfo } from "botbuilder";
+import { TeamsInfo, TurnContext } from "botbuilder";
 import { SlackMessageTypeMiddleware } from "botbuilder-adapter-slack";
 import * as restify from "restify";
 import notificationTemplate from "./adaptiveCards/notification-default.json";
 import { CardData } from "./cardModels";
 import config from "./internal/config";
+import slackTemplate from "./slack/slackTemplate";
 import { notificationApp, slackAdapter } from "./internal/initialize";
 import { TeamsBot } from "./teamsBot";
+import { SlackBotWorker } from "botbuilder-adapter-slack";
 
+import fs from "fs";
 // Create HTTP server.
 const server = restify.createServer();
 server.use(restify.plugins.queryParser());
@@ -15,6 +18,25 @@ server.use(restify.plugins.bodyParser());
 server.listen(process.env.port || process.env.PORT || 3978, () => {
   console.log(`\nApp Started, ${server.name} listening to ${server.url}`);
 });
+function writeDataToFile(data: any, filePath: string) {
+  fs.writeFileSync(filePath, JSON.stringify(data));
+}
+function readDataFromFile(filePath: string) {
+  try {
+    const fileData = fs.readFileSync(filePath, "utf-8");
+    return JSON.parse(fileData);
+  } catch (e) {
+    return {};
+  }
+}
+
+const filePath = "data.json"; // Specify the file path where the data is stored
+const userIdVsConversationReference = readDataFromFile(filePath);
+
+function addConversationReference(userId: string, conversationReference: any) {
+  userIdVsConversationReference[userId] = conversationReference;
+  writeDataToFile(userIdVsConversationReference, filePath);
+}
 
 // Register an API endpoint with `restify`.
 //
@@ -47,12 +69,14 @@ server.post(
 
       for (const target of installations) {
         await target.sendAdaptiveCard(
-          AdaptiveCards.declare<CardData>(notificationTemplate).render({
-            title: "New Event Occurred!",
-            appName: "Contoso App Notification",
-            description: `This is a sample http-triggered notification to ${target.type}`,
-            notificationUrl: "https://aka.ms/teamsfx-notification-new",
-          })
+          AdaptiveCards.declare<CardData>(notificationTemplate).render(
+            req?.body?.payload || {
+              title: "New Event Occurred!",
+              appName: "Contoso App Notification",
+              description: `This is a sample http-triggered notification to ${target.type}`,
+              notificationUrl: "https://aka.ms/teamsfx-notification-new",
+            }
+          )
         );
 
         // Note - you can filter the installations if you don't want to send the event to every installation.
@@ -146,7 +170,28 @@ server.post(
 const teamsBot = new TeamsBot();
 server.post("/api/messages", async (req, res) => {
   await notificationApp.requestHandler(req, res, async (context) => {
-    await teamsBot.run(context);
+    if (context.activity.type === "message") {
+      // Handle incoming messages
+      await handleIncomingMessage(context);
+    }
+    // await teamsBot.run(context);
+  });
+});
+
+server.post("/api/messages/slack", async (req, res) => {
+  const isSlackChallenge = req.body.type === "url_verification";
+
+  if (isSlackChallenge) {
+    // Respond to Slack challenge
+    const challenge = req.body.challenge;
+    res.send(challenge);
+    return;
+  }
+  slackAdapter.processActivity(req, res, async (context) => {
+    if (context.activity.type === "message") {
+      // Handle incoming messages
+      await handleIncomingMessage(context);
+    }
   });
 });
 
@@ -268,6 +313,13 @@ server.get("/slack/oauth", async (req, res) => {
 
     // Store the user ID in your service
     userStorage[userId] = { userId: user.user.id, userName: user.user.name };
+    userStorage[userId] = {
+      slack: {
+        user: user.user,
+        team: user.team,
+        accessToken: accessToken,
+      },
+    };
 
     res.send(200, "Authentication successful! You can close this window.");
   } catch (err) {
@@ -286,16 +338,6 @@ server.get("/slack/oauth", async (req, res) => {
 //     }
 //   );
 // }
-
-// Trigger proactive message to Slack
-async function sendSlackProactiveMessage(slackUserId) {
-  const conversationReference = await slackAdapter.continueConversation(
-    slackUserId,
-    async (context) => {
-      await context.sendActivity("Proactive message from Slack!");
-    }
-  );
-}
 
 // Example: Install app in Teams
 server.get("/install/teams", (req, res, next) => {
@@ -337,3 +379,56 @@ server.get("/slack/install/url", (req, res, next) => {
   const slackInstallUrl = `https://slack.com/oauth/v2/authorize?client_id=${slackClientId}&state=${state}&user=${userId}&redirect_uri=${slackRedirectUri}`;
   res.json({ url: slackInstallUrl });
 });
+
+// Trigger proactive message to Slack
+async function sendSlackProactiveMessage(slackUserId, message) {
+  const messageToSend = slackTemplate.billApprovalTemplate({ ...message });
+
+  await slackAdapter.continueConversation(
+    userIdVsConversationReference[slackUserId],
+    async (context) => {
+      // await context.sendActivity(message);
+      await context.sendActivity({
+        type: "message",
+        text: "New bill approval slack bot", // You can customize this text
+        channelData: {
+          ...messageToSend,
+        },
+      });
+    }
+  );
+}
+
+//write endpoint to sendp proactive msg to slack
+server.post("/slack/proactive", async (req, res) => {
+  const slackUserId = req.body.slackUserId;
+  const slackMessage = req.body.slackMessage;
+  await sendSlackProactiveMessage(slackUserId, slackMessage);
+  res.json({ status: "success" });
+});
+
+async function handleIncomingMessage(context) {
+  // Extract conversation reference
+  const conversationReference = TurnContext.getConversationReference(
+    context.activity
+  );
+
+  addConversationReference(
+    conversationReference.user.id,
+    conversationReference
+  );
+  await context.sendActivity(
+    `Hello! I received your message. Channel: ${conversationReference.channelId}`
+  );
+}
+
+async function sendProactiveMessage(toUserId, message) {
+  if (userIdVsConversationReference[toUserId]) {
+    await slackAdapter.continueConversation(
+      userIdVsConversationReference[toUserId],
+      async (context) => {
+        await context.sendActivity(message);
+      }
+    );
+  }
+}
