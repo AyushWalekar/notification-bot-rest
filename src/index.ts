@@ -11,6 +11,7 @@ import { TeamsBot } from "./teamsBot";
 import { SlackBotWorker } from "botbuilder-adapter-slack";
 
 import fs from "fs";
+import util from "./util";
 // Create HTTP server.
 const server = restify.createServer();
 server.use(restify.plugins.queryParser());
@@ -417,6 +418,15 @@ async function handleIncomingMessage(context) {
     conversationReference.user.id,
     conversationReference
   );
+  // if message = "hello", reply with "hello, how can i help you"
+  if (context.activity.text?.includes("hello")) {
+    await context.sendActivity("hello, how can i help you");
+  }
+  if (context.activity.text?.includes("rule")) {
+    await context.sendActivity("Working on it...");
+    const response = await util.processInput(context.activity.text);
+    await context.sendActivity(`There you go: ${response}`);
+  }
   await context.sendActivity(
     `Hello! I received your message. Channel: ${conversationReference.channelId}`
   );

@@ -25,6 +25,8 @@
         "@microsoft/teamsfx": "^2.3.0-rc-hotfix.0",
         "botbuilder": "^4.20.0",
         "botbuilder-adapter-slack": "^1.0.14",
+        "dotenv": "^16.3.1",
+        "openai": "^4.20.1",
         "request": "^2.88.2",
         "restify": "^10.0.0"
     },
