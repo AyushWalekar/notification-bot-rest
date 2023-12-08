@@ -4,7 +4,7 @@ require("dotenv").config();
 const apiKey = process.env.API_KEY;
 
 const openai = new OpenAI({
-  apiKey: "*****",
+  apiKey: "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",
 });
 
 const schemaInterface = `
@@ -537,17 +537,17 @@ async function createApprovalRule(approval) {
       approvalStepType: "Any",
       approvalEntities: [
         {
-          userId: "******",
+          userId: "e0f36b59-46df-477b-a457-c4452b2d43b3",
           onlyNotify: false,
         },
       ],
     },
   ];
-  const api_url = "https://******/approvals";
+  const api_url = "https://approval-service-5pt6lwesdq-uc.a.run.app/approvals";
   const headers = {
     "Content-Type": "application/json",
-    "x-tenant-id": "******",
-    "x-user-id": "******",
+    "x-tenant-id": "dda21c8c-6a99-4faf-bbd4-02c2e47be460",
+    "x-user-id": "e0f36b59-46df-477b-a457-c4452b2d43b3",
     "x-client": "chatbot-aw",
   };
   const response = await fetch(api_url, {
@@ -564,7 +564,7 @@ function logWorkingOnIt() {
   console.log("working on it..");
 }
 
-const UI_CLIENT = "******";
+const UI_CLIENT = "https://app.dev.rtzen.com";
 
 async function processInput(userInput) {
   const intervalId = setInterval(logWorkingOnIt, 1000);

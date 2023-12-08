@@ -1,17 +1,29 @@
 import { AdaptiveCards } from "@microsoft/adaptivecards-tools";
-import { TeamsInfo, TurnContext } from "botbuilder";
+import { Activity, CardFactory, TurnContext } from "botbuilder";
 import { SlackMessageTypeMiddleware } from "botbuilder-adapter-slack";
+import fs from "fs";
 import * as restify from "restify";
 import notificationTemplate from "./adaptiveCards/notification-default.json";
 import { CardData } from "./cardModels";
+import { connectToMongo } from "./db";
 import config from "./internal/config";
-import slackTemplate from "./slack/slackTemplate";
 import { notificationApp, slackAdapter } from "./internal/initialize";
+import { UserMapping } from "./model/UserMapping";
+import {
+  getUserMappingByChannelInfo,
+  getUserMappingByUserIdChannel,
+  upsertUserMapping,
+} from "./service/userService";
+import slackTemplate from "./slack/slackTemplate";
 import { TeamsBot } from "./teamsBot";
-import { SlackBotWorker } from "botbuilder-adapter-slack";
-
-import fs from "fs";
 import util from "./util";
+import { log } from "console";
+require("dotenv").config();
+
+const BASE_RTZEN_APP_URL = "http://localhost:3000";
+const RTZEN_LOGIN_PATH = "user-auth";
+
+connectToMongo();
 // Create HTTP server.
 const server = restify.createServer();
 server.use(restify.plugins.queryParser());
@@ -33,10 +45,21 @@ function readDataFromFile(filePath: string) {
 
 const filePath = "data.json"; // Specify the file path where the data is stored
 const userIdVsConversationReference = readDataFromFile(filePath);
+const rtzenUserIdVsChannelUserInfo = readDataFromFile(
+  "rtzenuserIdVsChannelUserInfo.json"
+);
 
 function addConversationReference(userId: string, conversationReference: any) {
   userIdVsConversationReference[userId] = conversationReference;
   writeDataToFile(userIdVsConversationReference, filePath);
+}
+
+function addRtzenUserIdVsChannelUserInfo(userId: string, channelUserInfo: any) {
+  rtzenUserIdVsChannelUserInfo[userId] = channelUserInfo;
+  writeDataToFile(
+    rtzenUserIdVsChannelUserInfo,
+    "rtzenuserIdVsChannelUserInfo.json"
+  );
 }
 
 // Register an API endpoint with `restify`.
@@ -55,6 +78,17 @@ server.post(
   restify.plugins.queryParser(),
   restify.plugins.bodyParser(), // Add more parsers if needed
   async (req, res) => {
+    const { channel, userId, payload } = req.body;
+    const userMapping = await getUserMappingByUserIdChannel(userId, channel);
+
+    if (channel === "slack") {
+      await sendSlackProactiveMessage(userMapping, payload);
+      return;
+    }
+    if (channel === "msteams") {
+      await sendTeamsProactiveMessage(userMapping, payload);
+      return;
+    }
     // By default this function will iterate all the installation points and send an Adaptive Card
     // to every installation.
     const pageSize = 100;
@@ -171,11 +205,11 @@ server.post(
 const teamsBot = new TeamsBot();
 server.post("/api/messages", async (req, res) => {
   await notificationApp.requestHandler(req, res, async (context) => {
-    if (context.activity.type === "message") {
-      // Handle incoming messages
-      await handleIncomingMessage(context);
-    }
+    // if (context.activity.type === "message") {
+    // Handle incoming messages
     // await teamsBot.run(context);
+    await handleIncomingMessage(context);
+    // }
   });
 });
 
@@ -209,22 +243,6 @@ const teamsAppPassword = "YOUR_TEAMS_APP_PASSWORD";
 // In-memory storage for simplicity. In production, use a database.
 const userStorage = {};
 
-// Create the Teams adapter
-const teamsAdapter = notificationApp.adapter;
-// const teamsAdapter = new TeamsAdapter({
-//   appId: appId,
-//   appPassword: appPassword,
-// });
-
-// // Create the Slack adapter
-// const slackAdapter = new SlackAdapter({
-//   // Add your Slack app credentials here
-//   clientId: "<your-client-id>",
-//   clientSecret: "<your-client-secret>",
-//   clientSigningSecret: "<your-signing-secret>",
-//   botToken: "<your-bot-token>",
-// });
-
 // Use SlackMessageTypeMiddleware to process Slack specific message types
 slackAdapter.use(new SlackMessageTypeMiddleware());
 
@@ -237,24 +255,59 @@ const teamsRedirectUri = `${config.botEndpoint}/teams/oauth`;
 // OAuth state map for associating state with user IDs
 const oauthStateMap = {};
 
-// Teams OAuth middleware
-// server.get("/teams/oauth", async (req, res) => {
-//   const state = req.query.state;
-//   const userId = oauthStateMap[state];
+server.get("/teams/auth/redirect", (req, res, next) => {
+  try {
+    const teamsUserID = req.query.teamsUserID;
 
-//   try {
-//     const tokenResponse = await TeamsInfo.getOAuthToken(req, { state });
-//     const user = await TeamsInfo.getUserInfo(req, tokenResponse.token);
+    // Save the user ID and associate it with a unique state
+    const state = Math.random().toString(36).substring(7);
+    oauthStateMap[state] = teamsUserID;
+    const callbackUrl = `${config.botEndpoint}/teams/oauth/callback?state=${state}`;
 
-//     // Store the user ID in your service
-//     userStorage[userId] = { userId: user.id, userName: user.name };
+    const authRedirectUrl = `${BASE_RTZEN_APP_URL}/${RTZEN_LOGIN_PATH}?redirectUrl=${encodeURIComponent(
+      callbackUrl
+    )}`;
+    res.redirect(authRedirectUrl, next);
+  } catch (err) {
+    console.error(err);
+    res.send(500, "Authentication failed.");
+  }
+});
 
-//     res.send(200, "Authentication successful! You can close this window.");
-//   } catch (err) {
-//     console.error(err);
-//     res.send(500, "Authentication failed.");
-//   }
-// });
+//Teams Auth callback
+server.get("/teams/oauth/callback", async (req, res) => {
+  const state = req.query.state;
+  const userId = req.query.userId;
+  const teamsUserId = oauthStateMap[state];
+
+  try {
+    // Store the user ID in your service
+    addRtzenUserIdVsChannelUserInfo(userId, {
+      ...rtzenUserIdVsChannelUserInfo[userId],
+      teams: {
+        userId: teamsUserId,
+      },
+    });
+    const existingUserMaping = await getUserMappingByChannelInfo(
+      teamsUserId,
+      "msteams"
+    );
+    const userMapping: UserMapping = {
+      ...existingUserMaping,
+      userId: userId,
+      channel: "msteams",
+      channelUserId: teamsUserId,
+      // TODO: preserve other info like teamsId, channelId etc.
+    };
+    await upsertUserMapping(userMapping);
+    //send message to teams user that "signed in"
+    await sendTeamsProactiveMessage(userMapping, "You are signed in!");
+    res.send(200, "Authentication successful! You can close this window.");
+  } catch (err) {
+    console.error(err);
+    res.send(500, "Authentication failed.");
+  }
+});
 
 // Slack OAuth middleware
 server.get("/slack/oauth", async (req, res) => {
@@ -264,22 +317,6 @@ server.get("/slack/oauth", async (req, res) => {
 
   try {
     // Exchange the code for an access token
-    // const response = await axios.post(
-    //   "https://slack.com/api/oauth.v2.access",
-    //   {
-    //     client_id: slackClientId,
-    //     client_secret: slackClientSecret,
-    //     code: code,
-    //     redirect_uri: slackRedirectUri,
-    //     grant_type: "authorization_code",
-    //   },
-    //   {
-    //     headers: {
-    //       "Content-Type": "application/x-www-form-urlencoded",
-    //     },
-    //   }
-    // );
-
     const formData = new URLSearchParams();
     formData.append("client_id", slackClientId);
     formData.append("client_secret", slackClientSecret);
@@ -322,6 +359,21 @@ server.get("/slack/oauth", async (req, res) => {
       },
     };
 
+    const existingUserMaping = await getUserMappingByChannelInfo(
+      user.user.id,
+      "slack"
+    );
+
+    const userMapping: UserMapping = {
+      ...existingUserMaping,
+      userId: userId,
+      channel: "slack",
+      channelUserId: user.user.id,
+      metadata: user,
+      // TODO: preserve other info like teamsId, channelId etc.
+    };
+    await upsertUserMapping(userMapping);
+
     res.send(200, "Authentication successful! You can close this window.");
   } catch (err) {
     console.error(err);
@@ -330,19 +382,22 @@ server.get("/slack/oauth", async (req, res) => {
 });
 
 // Trigger proactive message to Teams
-// async function sendTeamsProactiveMessage(teamsUserId) {
-//   const conversationReference = await teamsAdapter.continueConversation(
-//     teamsAppId,
-//     teamsUserId,
-//     async (context) => {
-//       await context.sendActivity("Proactive message from Teams!");
-//     }
-//   );
-// }
+async function sendTeamsProactiveMessage(userMapping, payload) {
+  await notificationApp.adapter.continueConversationAsync(
+    config.botId,
+    userMapping.conversationReference,
+    async (context) => {
+      if (typeof payload !== "string") {
+        payload = CardFactory.adaptiveCard(payload);
+      }
+      await context.sendActivity({ attachments: [payload] });
+    }
+  );
+}
 
 // Example: Install app in Teams
 server.get("/install/teams", (req, res, next) => {
-  const userId = "unique_user_id"; // Generate a unique user ID in your application
+  const userId = req.query.userId; // Generate a unique user ID in your application
 
   // Save the user ID and associate it with a unique state
   const state = Math.random().toString(36).substring(7);
@@ -409,15 +464,48 @@ server.post("/slack/proactive", async (req, res) => {
 });
 
 async function handleIncomingMessage(context) {
+  const channelUserId = context.activity.from.id;
   // Extract conversation reference
   const conversationReference = TurnContext.getConversationReference(
     context.activity
   );
+  let userMapping: Partial<UserMapping> = await getUserMappingByChannelInfo(
+    channelUserId,
+    context.activity.channelId
+  );
+  if (!userMapping) {
+    userMapping = {
+      channel: context.activity.channelId,
+      channelUserId: channelUserId,
+    };
+  }
+  userMapping.conversationReference = conversationReference;
+  await upsertUserMapping(userMapping);
+
+  if (context.activity.channelId === "msteams") {
+    await teamsBot.run(context);
+  }
+
+  if (context.activity.channelId === "slack") {
+    //TODO:
+    // await handleIncomingSlackMessage(context);
+  }
+
+  if (context.activity.type !== "message") {
+    console.log("not a message: ", context.activity.type, context.activity);
+    return;
+  }
+
+  if (!(await isUserSignedIn(context))) {
+    // handleSignIn(context);
+    return;
+  }
 
   addConversationReference(
     conversationReference.user.id,
     conversationReference
   );
+
   // if message = "hello", reply with "hello, how can i help you"
   if (context.activity.text?.includes("hello")) {
     await context.sendActivity("hello, how can i help you");
@@ -441,4 +529,17 @@ async function sendProactiveMessage(toUserId, message) {
       }
     );
   }
+}
+
+async function isUserSignedIn(context) {
+  const activity = context.activity as Activity;
+  if (activity?.channelId && activity.from.id) {
+    const userMapping = await getUserMappingByChannelInfo(
+      activity.from.id,
+      activity.channelId
+    );
+    context.userMapping = userMapping;
+    return !!userMapping.userId;
+  }
+  return false;
 }
