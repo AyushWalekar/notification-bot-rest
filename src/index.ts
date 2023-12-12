@@ -17,6 +17,7 @@ import {
 import slackTemplate from "./slack/slackTemplate";
 import { TeamsBot } from "./teamsBot";
 import util from "./util";
+import pyUtils from "./pyUtils";
 import { log } from "console";
 require("dotenv").config();
 
@@ -389,8 +390,10 @@ async function sendTeamsProactiveMessage(userMapping, payload) {
     async (context) => {
       if (typeof payload !== "string") {
         payload = CardFactory.adaptiveCard(payload);
+        await context.sendActivity({ attachments: [payload] });
+      } else {
+        await context.sendActivity(payload);
       }
-      await context.sendActivity({ attachments: [payload] });
     }
   );
 }
@@ -437,20 +440,21 @@ server.get("/slack/install/url", (req, res, next) => {
 });
 
 // Trigger proactive message to Slack
-async function sendSlackProactiveMessage(slackUserId, message) {
-  const messageToSend = slackTemplate.billApprovalTemplate({ ...message });
-
+async function sendSlackProactiveMessage(userMapping, payload) {
   await slackAdapter.continueConversation(
-    userIdVsConversationReference[slackUserId],
+    userMapping.conversationReference,
     async (context) => {
-      // await context.sendActivity(message);
-      await context.sendActivity({
-        type: "message",
-        text: "New bill approval slack bot", // You can customize this text
-        channelData: {
-          ...messageToSend,
-        },
-      });
+      if (typeof payload !== "string") {
+        // Assume payload is an object that represents the Slack message attachment
+        const slackMessage = {
+          type: "message",
+          text: payload.text || "New notification from rtZen-dev",
+          channelData: { ...payload }, // This should be an array of Slack attachments
+        };
+        await context.sendActivity(slackMessage);
+      } else {
+        await context.sendActivity(payload);
+      }
     }
   );
 }
@@ -510,9 +514,10 @@ async function handleIncomingMessage(context) {
   if (context.activity.text?.includes("hello")) {
     await context.sendActivity("hello, how can i help you");
   }
-  if (context.activity.text?.includes("rule")) {
+  if (context.activity.text?.startsWith("copilot:")) {
     await context.sendActivity("Working on it...");
-    const response = await util.processInput(context.activity.text);
+    // const response = await util.processInput(context.activity.text);
+    const response = await pyUtils.processInput(context.activity.text);
     await context.sendActivity(`There you go: ${response}`);
   }
   await context.sendActivity(

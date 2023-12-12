@@ -6,7 +6,7 @@ const config = {
   slackSigningSecret: process.env.SLACK_SIGNING_SECRET,
   slackVerificationToken: process.env.SLACK_VERIFICATION_TOKEN,
   slackBotUserToken: process.env.SLACK_BOT_USER_TOKEN,
-  botEndpoint: "https://4x5m6kfz-3978.inc1.devtunnels.ms",
+  botEndpoint: "https://86v1939g-3978.inc1.devtunnels.ms",
   mongoDbUri: "mongodb://localhost:27017",
 };
 
